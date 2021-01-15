@@ -1,15 +1,18 @@
 import copy
+import itertools
 
 import matplotlib.pyplot as plt
 import numpy as np
 import reflex
 from reflex import reco
-from util import astra_reco, astra_residual, geoms_from_reflex, \
+
+from cate import annotate
+from cate.xray import plot_projected_markers, xray_multigeom_project
+from needles.util import astra_reco, astra_residual, geoms_from_interpolation, \
+    geoms_from_reflex, \
     needle_data_from_reflex, needle_path_to_location_filename, pixels2coords, \
     plot_astra_volume, plot_residual, run_calibration, \
     run_initial_marker_optimization
-
-from cate.xray import plot_projected_markers, xray_multigeom_project
 
 """
 The idea is that we can use 3 projections of the needle scan to find the
@@ -24,51 +27,104 @@ in the volumes that are obtained with backprojection of the data. These are
 the estimated positions of the markers.
 """
 
+
+class NeedleEntityLocations(annotate.EntityLocations):
+    ENTITY_TYPES = ('eye', 'nail', 'ball')
+    ENTITY_ORIENTATIONS = ('stake', 'drill')
+    ENTITY_LOCATIONS = ('high', 'low')
+
+    @staticmethod
+    def nr_entities():
+        return len(NeedleEntityLocations.ENTITY_TYPES) \
+               * len(NeedleEntityLocations.ENTITY_ORIENTATIONS) \
+               * len(NeedleEntityLocations.ENTITY_LOCATIONS)
+
+    @staticmethod
+    def get_iter():
+        # lst = []
+        # for t, o, l in itertools.product(NeedleEntityLocations.ENTITY_TYPES,
+        #                                  NeedleEntityLocations.ENTITY_ORIENTATIONS,
+        #                                  NeedleEntityLocations.ENTITY_LOCATIONS):
+        #     lst.append(f"{t} {o} {l}")
+        # return iter(lst)
+        return itertools.product(NeedleEntityLocations.ENTITY_TYPES,
+                                 NeedleEntityLocations.ENTITY_ORIENTATIONS,
+                                 NeedleEntityLocations.ENTITY_LOCATIONS)
+
+
 # STEP 1: ---------------------------------------------------------------------
 # obtaining high-quality positions of markers
 # -----------------------------------------------------------------------------
 # Find highly accurate needle points from a pre-scan
-plot_all = False
-plot_step1 = False | plot_all
+plot_all = True
+plot_step1 = True | plot_all
 plot_step2 = True | plot_all
 plot_step3 = True | plot_all
-phantom_dir = '/home/adriaan/data/NeedleCalibration/25Sep2020/pos_2/'
+prefix = '/bigstore/felix'
+# prefix = '/home/adriaan/data'
+phantom_dir = f'{prefix}/NeedleCalibration/25Sep2020/pos_2/'
+# phantom_dir = '/home/adriaan/data/NeedleCalibration/11Dec2020/source0dec0'
 phantom_detector = reco.Reconstruction(phantom_dir).detector()
+
 phantom_offset = 0
 # in pos2 projection nrs for annotated markerpoints, there are [0, ..., 3600]
 # projs, where 0 and 3600 are not exactly the same, although they might
 # supposed to be so it could be a small incremental error that we might safely
 # ignore, I don't know
 phantom_projs_amount = reflex.nr_projs(phantom_dir) - 1
-phantom_nrs = [phantom_offset,
-               phantom_offset + 3600 // 3,
-               phantom_offset + 2 * 3600 // 3]
-phantom_angles = [i / 3600 * 2 * np.pi for i in phantom_nrs]
-phantom_geoms = geoms_from_reflex(phantom_dir, phantom_angles)
+phantom_calib_nrs = [phantom_offset,
+                     phantom_offset + 3600 // 3,
+                     phantom_offset + 2 * 3600 // 3]
+phantom_reco_downsampling_factor = 5
+phantom_reco_nrs = range(0, 3600, phantom_reco_downsampling_factor)
+phantom_calib_angles = [i / 3600 * 2 * np.pi for i in phantom_calib_nrs]
+phantom_calib_geoms = geoms_from_reflex(phantom_dir, phantom_calib_angles,
+                                        parametrization='rotation_stage')
 phantom_data = needle_data_from_reflex(phantom_dir,  # annotated data
-                                       phantom_nrs,
+                                       phantom_calib_nrs,
+                                       NeedleEntityLocations,
                                        needle_path_to_location_filename(
                                            phantom_dir),
-                                       open_manager=False)
+                                       open_annotator=False)
 pixels2coords(phantom_data, phantom_detector)
 phantom_markers = run_initial_marker_optimization(
-    phantom_geoms,
+    phantom_calib_geoms,
+    # np.array([list(d.values()) for d in phantom_data]),
     phantom_data,
-    nr_iters=50)
+    nr_iters=10,
+    plot=False)
 # full-angle reconstruction
-phantom_reco_downsampling_factor = 10
-phantom_reco_range = range(0, 3600, phantom_reco_downsampling_factor)
+
+
+voxels_x = 300
 phantom_vol_id, phantom_vol_geom, phantom_proj_id, phantom_proj_geom = \
     astra_reco(phantom_dir,
-               phantom_reco_range,
+               phantom_reco_nrs,
                algo='fdk',
-               angles=[i / 3600 * 2 * np.pi for i in phantom_reco_range])
+               angles=[i / 3600 * 2 * np.pi for i in phantom_reco_nrs],
+               voxels_x=voxels_x
+               )
 vmin, vmax = -1.5, 1.5  # manually determined value
+
+interpolated_geoms = geoms_from_interpolation(
+    tilted_geom=phantom_calib_geoms[0].decorated_geometry,
+    interpolation_geoms=phantom_calib_geoms,
+    interpolation_nrs=phantom_reco_nrs,
+    interpolation_calibration_nrs=phantom_calib_nrs
+)
+interpolated_phantom_vol_id, interpolated_phantom_vol_geom, interpolated_phantom_proj_id, interpolated_phantom_proj_geom = \
+    astra_reco(phantom_dir,
+               phantom_reco_nrs,
+               algo='fdk',
+               geoms=interpolated_geoms,
+               voxels_x=voxels_x
+               )
 
 if plot_step1:
     # Reproject the groundtruth-volume to see how well the groundtruth volume
     # has been calibrated.
     plot_astra_volume(phantom_vol_id, phantom_vol_geom)
+    plot_astra_volume(interpolated_phantom_vol_id, interpolated_phantom_vol_geom)
 
     # reproject
     proj_id_new = reco.Reconstruction.forward(
@@ -80,17 +136,27 @@ if plot_step1:
     # residual without calibration (don't know how to subtract on GPU with ASTRA)
     res = reco.Reconstruction.sinogram(phantom_proj_id) - \
           reco.Reconstruction.sinogram(proj_id_new)
-    plot_residual(np.array(phantom_nrs) // phantom_reco_downsampling_factor,
-                  res, vmin=vmin, vmax=vmax,
-                  title='residual: before marker optimization-calibration')
+    plot_residual(
+        np.array(phantom_calib_nrs) // phantom_reco_downsampling_factor,
+        res, vmin=vmin, vmax=vmax,
+        title='residual: before marker optimization-calibration')
     plt.pause(.001)
 
     # Now reproject using the calibrated geometry.
-    res = astra_residual(phantom_dir, phantom_nrs, phantom_vol_id,
+    res = astra_residual(phantom_dir, phantom_calib_nrs, phantom_vol_id,
                          phantom_vol_geom,
-                         geoms=phantom_geoms)
-    plot_residual(range(len(phantom_angles)), res, vmin=vmin, vmax=vmax,
+                         geoms=phantom_calib_geoms)
+    plot_residual(range(len(phantom_calib_angles)), res, vmin=vmin, vmax=vmax,
                   title='residual: after marker optimization-calibration')
+    plt.pause(.001)
+
+    # Now reproject using the calibrated geometry and interpolated reconstr.
+    res = astra_residual(phantom_dir, phantom_calib_nrs,
+                         interpolated_phantom_vol_id,
+                         interpolated_phantom_vol_geom,
+                         geoms=phantom_calib_geoms)
+    plot_residual(range(len(phantom_calib_angles)), res, vmin=vmin, vmax=vmax,
+                  title='residual: after marker calibration and reinterpolation')
     plt.show()
 
     # If pre-calibration works well, it showed that even with a
@@ -108,7 +174,7 @@ if plot_step1:
 # there are 15 images (0, ..., 14), of which 0 and 14 are the same.
 # so there is effectively 14 images
 # however in pert_0 and pert_2++ there are 24 images
-experiment_dir = '/home/adriaan/data/NeedleCalibration/25Sep2020/pert_2++/'
+experiment_dir = f'{prefix}/NeedleCalibration/25Sep2020/pert_2++/'
 name = experiment_dir.strip('/').split('/')[-1]
 experiment_projs_amount = reflex.nr_projs(experiment_dir) - 1  # last eq first
 if name == 'pert_0':  # 24 images
@@ -126,9 +192,9 @@ experiment_angles = [i / experiment_projs_amount * 2 * np.pi for i in
 
 # Load data with annotation
 data = needle_data_from_reflex(
-    experiment_dir, experiment_nrs,
+    experiment_dir, experiment_nrs, NeedleEntityLocations,
     needle_path_to_location_filename(experiment_dir),
-    open_manager=False)
+    open_annotator=False)
 pixels2coords(data, phantom_detector)
 
 # As a guess for the geometry, in this case we take the geometry of the phantom
@@ -143,8 +209,8 @@ markers = copy.copy(phantom_markers)
 # Rotate the found points so that they match
 # TODO: this information we don't have in practice! and we'll probably have
 #   to do a manual or bruteforce search over possible angles.
-for p in markers:
-    p.optimize = False
+# for p in markers:
+#     p.optimize = False
     # TODO: implement rotation
 
 # Baseline: how good is the geometry guess: projected phantom points vs data
@@ -204,6 +270,3 @@ if plot_step3:
 # The problem is that we have only optimized 3 geometries that we had to annotate.
 # The reconstruction is build from all geoms, and a 3-angle reconstruction
 # will obviously have a huge residual (even with high number of SIRT iters)
-
-# TODO: -> optimize for all angles simultaneous by the constrained that there
-#     is a constant increment between the angles

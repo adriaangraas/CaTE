@@ -1,17 +1,11 @@
-import itertools
+from abc import ABC, abstractmethod
 
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.widgets import Button
 
 
-class EntityLocations:
-    ENTITY_TYPES = ('eye', 'nail', 'ball')
-    ENTITY_ORIENTATIONS = ('stake', 'drill')
-    ENTITY_LOCATIONS = ('high', 'low')
-    NR_ENTITIES = len(ENTITY_TYPES) * len(ENTITY_ORIENTATIONS) * len(
-        ENTITY_LOCATIONS)
-
+class EntityLocations(ABC):
     def __init__(self, fname, angle_nr):
         self.fname = fname
         self.angle_nr = angle_nr
@@ -32,7 +26,7 @@ class EntityLocations:
 
         return value
 
-    def __setitem__(self, key, value: tuple):
+    def __setitem__(self, key, value: list):
         print(f"Setting {key} to {value} for projection {self.angle_nr}.")
         if not (self.angle_nr in self._locations):
             self._locations[self.angle_nr] = dict()
@@ -44,14 +38,18 @@ class EntityLocations:
         np.save(self.fname, self._locations)
 
     @staticmethod
+    @abstractmethod
     def get_iter():
-        return itertools.product(EntityLocations.ENTITY_TYPES,
-                                 EntityLocations.ENTITY_ORIENTATIONS,
-                                 EntityLocations.ENTITY_LOCATIONS)
+        raise NotImplementedError()
+
+    @staticmethod
+    @abstractmethod
+    def nr_entities():
+        raise NotImplementedError()
 
 
-class Manager:
-    def __init__(self, locations, proj):
+class Annotator:
+    def __init__(self, locations, proj, block=True):
         self._fig, _ = plt.subplots()
         plt.subplots_adjust(bottom=0.2)
         plt.tight_layout()
@@ -66,9 +64,9 @@ class Manager:
 
         self._active_entity = None
         self._active_arrow = None
-        self._button_height = 1. / EntityLocations.NR_ENTITIES
+        self._button_height = 1. / locations.nr_entities()
 
-        for i, key in enumerate(EntityLocations.get_iter()):
+        for i, key in enumerate(locations.get_iter()):
             butt_loc = [0.7, i * self._button_height, .3, self._button_height]
             butt_ax = plt.axes(butt_loc)
 
@@ -77,7 +75,8 @@ class Manager:
                 coords = f"{coords[0]:.2f}, {coords[1]:.1f}"
             else:
                 coords = ''
-            butt = Button(butt_ax, f"{key[0]} {key[1]} {key[2]}\n{coords}")
+
+            butt = Button(butt_ax, f"{key}\n{coords}")
 
             def click_event_handler(this_button, buttons):
                 def _onclick(event):
@@ -96,7 +95,7 @@ class Manager:
             butt.on_clicked(click_event_handler(butt, self._entity_buttons))
 
         self._draw_arrows()
-        plt.show()
+        plt.show(block=block)
 
     def handle_click(self, event):
         if self._active_entity is None:
@@ -112,7 +111,7 @@ class Manager:
         if not event.dblclick:
             return  # we need single click to zoom
 
-        self._entities[self._active_entity] = (event.xdata, event.ydata)
+        self._entities[self._active_entity] = [event.xdata, event.ydata]
         self._draw_arrows()
 
     def set_active(self, key):

@@ -7,7 +7,7 @@ import numpy as np
 class Parameter(ABC):
     """A delayable value with optimization information."""
 
-    def __init__(self, value, optimize: bool = True, bounds=None):
+    def __init__(self, value=None, optimize: bool = True, bounds=None):
         """
         :param value: Can also be `Callable` to delay computation.
         :param optimize: Set to `False` to disable fitting procedure.
@@ -15,13 +15,7 @@ class Parameter(ABC):
         """
         self._value = value
         self.optimize = optimize
-
-        if bounds is None:
-            lower = [-np.inf] * self.__len__()
-            upper = [np.inf] * self.__len__()
-            bounds = [lower, upper]
-
-        self.bounds = bounds
+        self._bounds = bounds
 
     @property
     def value(self):
@@ -33,7 +27,16 @@ class Parameter(ABC):
     @value.setter
     def value(self, value):
         self._value = value
-        assert len(self) > 0
+
+    @property
+    def bounds(self):
+        if self._bounds is not None:
+            return self._bounds
+
+        lower = [-np.inf] * self.__len__()
+        upper = [np.inf] * self.__len__()
+        bounds = [lower, upper]
+        return bounds
 
     def __len__(self):
         if np.isscalar(self._value):
@@ -43,11 +46,23 @@ class Parameter(ABC):
 
 
 class ScalarParameter(Parameter):
-    def __init__(self, value, optimize: bool = True, bounds=None):
-        if not np.isscalar(value):
-            raise TypeError("`value` must be a scalar.")
-
+    def __init__(self, value=None, optimize: bool = True, bounds=None):
         super(ScalarParameter, self).__init__(value, optimize, bounds)
+
+    @property
+    def value(self):
+        return super().value
+
+    @value.setter
+    def value(self, value):
+        if value is not None:
+            if isinstance(value, np.ndarray):
+                value = value.item()
+
+            if not np.isscalar(value):
+                raise TypeError("`value` must be a scalar.")
+
+        self._value = value
 
 
 class VectorParameter(Parameter):
@@ -58,7 +73,7 @@ class VectorParameter(Parameter):
     locations, so I don't want to implicitly choose one.
     """
 
-    def __init__(self, value, optimize: bool, bounds=None):
+    def __init__(self, value, optimize: bool = True, bounds=None):
         if issubclass(type(value), list):
             value = np.array(value, dtype=np.float)
 

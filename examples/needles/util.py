@@ -6,71 +6,154 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pyqtgraph as pq
 import scipy.optimize
+from scipy import interpolate
 
 from cate import xray
-from cate.annotate import EntityLocations, Manager
-from cate.param import params2ndarray
+from cate.annotate import Annotator
+from cate.param import ScalarParameter, VectorParameter, params2ndarray
 from cate.xray import Detector, XrayOptimizationProblem, \
     markers_from_leastsquares_intersection, plot_projected_markers, \
     xray_multigeom_project
 
 
-def needle_data_from_reflex(dir, nrs,
+def needle_data_from_reflex(dir,
+                            nrs,
+                            entity_locations_class,
                             fname='needle_locations.npy',
-                            open_manager=False):
+                            open_annotator=False) -> list:
     """(Re)store marker projection coordinates from annotations
-    Important: the resulting array has to be consistently ordered.
-    """
-    import reflex
-    projs = reflex.projs(dir, nrs)
 
-    if open_manager:
+    :return list
+        List of `dict`, each dict being a projection angle, and each item
+        from the dictionary is a key-value pair of identifier and pixel
+        location."""
+    import reflex
+
+    if open_annotator:
+        projs = reflex.projs(dir, nrs)
         for nr, proj in zip(nrs, projs):
-            loc = EntityLocations(fname, nr)
-            Manager(loc, proj)
+            loc = entity_locations_class(fname, nr)
+            Annotator(loc, proj)
 
     data = []
-    for nr, proj in zip(nrs, projs):
-        loc = EntityLocations(fname, nr)
+    for nr in nrs:
+        loc = entity_locations_class(fname, nr)
         l = loc.locations()
-        l = [l[i] for i in sorted(l)]
-        l = [list(i) for i in l]
+
+        # for backwards compatibility (I used tuples before)
+        for id, pixel in l.items():
+            if isinstance(l[id], tuple):
+                l[id] = list(pixel)
+
         data.append(l)
 
-    return np.array(data)
+    return data
 
 
-def geoms_from_reflex(dir: str, angles):
-    """Load CATE X-ray geometries from FleX-ray descriptions, using Reflex"""
+def geoms_from_interpolation(tilted_geom,
+                             interpolation_geoms=None,
+                             interpolation_nrs=None,
+                             interpolation_calibration_nrs=None):
+    if interpolation_geoms is None or interpolation_nrs is None \
+        or interpolation_calibration_nrs is None:
+        raise ValueError
+
+    # reinterpolate angles (x=nrs, y=angles)
+    y = [g.transformation_yaw for g in interpolation_geoms]
+    y = np.squeeze(np.array(y))
+    f = interpolate.interp1d(interpolation_calibration_nrs, y,
+                             fill_value='extrapolate')
+    xnew = interpolation_nrs
+    ynew = f(xnew)
+    # plt.plot(interpolation_calibration_nrs, y, 'o', xnew, ynew, '-')
+    # plt.show()
+
+    geoms = []
+
+    for i, angle in enumerate(ynew):
+        rotated_geom = xray.transform(tilted_geom, yaw=angle)
+        geoms.append(rotated_geom)
+
+    return geoms
+
+
+def geoms_from_reflex(dir: str, angles, parametrization='default'):
+    """Load CATE X-ray geometries from FleX-ray descriptions, using Reflex
+
+    :param parametrization
+        The way of initializing CATE geometries. If 'default', then each
+        angle from the FleX-ray geometry will have unique `source` and `detector`
+        parameters, as well as `roll`, `pitch`, and `yaw`.
+        When the `parametrization` is 'rotation_stage', the geometry is encoded
+        as an initial static geometry, and all the subsequent geometries are
+        parametrized as a rotation of the initial geometry.
+    """
     import reflex
 
     for a in angles:  # because I'm stupid enough to feed proj numbers in here
         assert 0 <= a <= 2 * np.pi
 
     sett = reflex.Settings.from_path(dir)
-    reflex_geoms = reflex.circular_geometry(sett, angles, verbose=False)
+    motor_geom = reflex.motor_geometry(sett, verbose=False)
 
-    geoms = []
-    for nr, rg in reflex_geoms.to_dict().items():
-        rg = reflex.centralize(rg)
-        geoms.append(xray.StaticGeometry(
-            source=rg.tube_position,
-            detector=rg.detector_position,
-            detector_props=rg.detector  # same object different name
-        ))
+    if parametrization == 'rotation_stage':
+        geoms = []
+
+        # describe a tilt of the rotation stage, which doesn't require yaw
+        # (rotation about z-axis)
+        motor_geom = reflex.centralize(motor_geom)
+        initial_geom = xray.StaticGeometry(
+            source=VectorParameter(motor_geom.tube_position),
+            detector=VectorParameter(motor_geom.detector_position),
+            roll=ScalarParameter(None),
+            pitch=ScalarParameter(None),
+            yaw=ScalarParameter(None))
+        tilted_geom = xray.transform(initial_geom,
+                                     roll=ScalarParameter(0.),
+                                     pitch=ScalarParameter(0.))
+
+        # describe as a rotation of `angle` from the initial point
+        # the alternative could be to chain-describe the geometries, not sure
+        # if that is better
+        for i, angle in enumerate(angles):
+            rotated_geom = xray.transform(
+                tilted_geom,
+                yaw=ScalarParameter(angle, optimize=True))
+            geoms.append(rotated_geom)
+
+    elif parametrization == 'default':
+        reflex_geoms = reflex.circular_geometry(sett,
+                                                motor_geom,
+                                                angles)
+        geoms = []
+        for nr, rg in reflex_geoms.to_dict().items():
+            rg = reflex.centralize(rg)
+            geoms.append(xray.StaticGeometry(
+                source=VectorParameter(rg.tube_position),
+                detector=VectorParameter(rg.detector_position),
+                roll=ScalarParameter(None),
+                pitch=ScalarParameter(None),
+                yaw=ScalarParameter(None)))
+    else:
+        raise ValueError
 
     return geoms
 
 
-def geom2astravec(g: xray.StaticGeometry):
+def geom2astravec(g: xray.StaticGeometry, detector):
     """CATE X-ray geom -> ASTRA vector description
 
     Note that the CATE description is dimensionless, so we use DET_PIXEL_WIDTH
     and DET_PIXEL_HEIGHT inside the function to go back to real dimensions."""
-    c = lambda x: (x[1], x[0], x[2])
-    d = lambda x: np.array((- x[1], - x[0], x[2])) * g.detector_props.pixel_width
-    e = lambda x: np.array((- x[1], - x[0], x[2])) * g.detector_props.pixel_height
-    return [*c(g.source), *c(g.detector), *d(g.u), *e(g.v)]
+    c = lambda x: (x[1], x[0], - x[2])
+    d = lambda x: np.array(
+        (- x[1], - x[0], x[2])) * detector.pixel_width
+    e = lambda x: np.array(
+        (- x[1], - x[0], x[2])) * detector.pixel_height
+    return [*c(g.source),
+            *c(g.detector),
+            *d(xray.StaticGeometry.u(g.roll, g.pitch, g.yaw)),
+            *e(xray.StaticGeometry.v(g.roll, g.pitch, g.yaw))]
 
 
 def pixel2coord(pixel, det: Detector):
@@ -80,24 +163,26 @@ def pixel2coord(pixel, det: Detector):
     detector midpoint is in (0, 0), the z-axis is pointing upwards and the
     image is flipped.
     """
-    pixel[1] = -pixel[1] + det.cols # revert vertical axis (image convention)
-    pixel[0] = (pixel[0] - det.rows / 2) * det.pixel_width
-    pixel[1] = (pixel[1] - det.cols / 2) * det.pixel_height
-    pixel[0] = -pixel[0]  # observer frame is always flipped left-right
+    pixel[0] = -pixel[0] + det.cols  # revert vertical axis (image convention)
+    pixel[1] = (pixel[1] - det.rows / 2) * det.pixel_width
+    pixel[0] = (pixel[0] - det.cols / 2) * det.pixel_height
+    pixel[1] = -pixel[1]  # observer frame is always flipped left-right
 
     return pixel
 
 
 def pixels2coords(data, detector: Detector):
-    for angle in data:
-        for pixel in angle:
+    for proj in data:  # type: dict
+        for id, pixel in proj.items():
             pixel[:] = pixel2coord(pixel, detector)
 
 
-def plot_astra_volume(vol_id, vol_geom, points: Any = False):
+def plot_astra_volume(vol_id, vol_geom, points: Any = False, from_side=False):
     from reflex import reco
 
     volume = reco.Reconstruction.volume(vol_id)
+    if from_side:
+        volume = np.transpose(volume, [2, 1, 0])
 
     if points:
         voxel_x_size = (vol_geom['option']['WindowMaxX'] -
@@ -156,7 +241,8 @@ def astra_reco(
     voxels_x=300,
     angles=None,
     geoms=None,
-    iters: int = 250
+    iters: int = 250,
+    **kwargs
 ):
     """
     Ordinary ASTRA reconstruction using FleX-ray files with Reflex
@@ -180,7 +266,8 @@ def astra_reco(
 
     rec = reco.Reconstruction(
         path=proj_path,
-        proj_range=nrs
+        proj_range=nrs,
+        **kwargs
     )
 
     sinogram = rec.load_sinogram()
@@ -191,7 +278,7 @@ def astra_reco(
     else:
         # convert input `geoms` to ASTRA vectors, take detector from
         # FleX-ray settings
-        vectors = np.array([geom2astravec(g) for g in geoms])
+        vectors = np.array([geom2astravec(g, rec.detector()) for g in geoms])
 
     sino_id, proj_geom = rec.sino_gpu_and_proj_geom(
         sinogram,
@@ -219,15 +306,14 @@ def astra_residual(projs_path, nrs, vol_id, vol_geom, angles=None, geoms=None):
         proj_range=nrs
     )
 
+    detector = rec.detector()
     if geoms is None:
         if angles is None:
             raise ValueError("Either supply `geoms` or `angles`.")
 
-        detector = rec.detector()
         vectors = rec.geom(angles)
     else:
-        detector = geoms[0].detector_props
-        vectors = np.array([geom2astravec(g) for g in geoms])
+        vectors = np.array([geom2astravec(g, rec.detector()) for g in geoms])
 
     sino_id, proj_geom = rec.sino_gpu_and_proj_geom(
         0.,  # zero-sinogram
@@ -314,7 +400,7 @@ def run_calibration(geoms, markers, data, plot_dets=False, verbose=True):
         plt.show()
 
 
-def run_initial_marker_optimization(geoms, data, nr_iters: int = 20):
+def run_initial_marker_optimization(geoms, data, nr_iters: int = 20, plot=False):
     """Find points of the phantom that we have because of a high-resolution
     prescan.
     """
@@ -327,8 +413,9 @@ def run_initial_marker_optimization(geoms, data, nr_iters: int = 20):
         # marker locations, which is a LS intersection of lines.
         markers = markers_from_leastsquares_intersection(
             geoms, data,
-            plot=False,
-            optimizable=False)
+            optimizable=False,
+            plot=plot,
+        )
         # Then find the optimal geoms given the `points` and `data`, in-place.
         run_calibration(geoms, markers, data, verbose=False)
 
@@ -344,6 +431,7 @@ def plot_residual(inds, res, vmin=None, vmax=None, title=None):
     for i, ind in enumerate(inds):
         im = axs[i].imshow(res[:, ind], vmin=vmin, vmax=vmax)
         fig.colorbar(im, ax=axs[i])
+
 
 def needle_path_to_location_filename(path):
     s = path.strip("/").split("/")
