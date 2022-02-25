@@ -16,7 +16,10 @@ class EntityLocations(ABC):
             self._locations = dict()
 
     def locations(self):
-        return self._locations[self.angle_nr]
+        if len(self._locations) == 0:
+            raise Exception("Location file is empty.")
+
+        return dict(sorted(self._locations[self.angle_nr].items()))
 
     def __getitem__(self, item):
         try:
@@ -49,7 +52,12 @@ class EntityLocations(ABC):
 
 
 class Annotator:
-    def __init__(self, locations, proj, block=True):
+    def __init__(self,
+                 locations: EntityLocations,
+                 proj,
+                 block=True,
+                 vmin=None,
+                 vmax=None):
         self._fig, _ = plt.subplots()
         plt.subplots_adjust(bottom=0.2)
         plt.tight_layout()
@@ -57,7 +65,7 @@ class Annotator:
                                            self.handle_click)
         self._proj_ax = plt.subplot(1, 2, 1)
         # ax.title(proj_nr)
-        self._proj_ax.imshow(proj)
+        self._proj_ax.imshow(proj, vmin=vmin, vmax=vmax)
 
         self._entities = locations
         self._entity_buttons = {}

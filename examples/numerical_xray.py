@@ -1,20 +1,21 @@
 import numpy as np
 
-from cate.xray import MarkerLocation, StaticGeometry
+from cate.param import VectorParameter
+from cate.xray import Geometry
 
 
 def rotate_markers(markers, roll=0., pitch=0., yaw=0.):
     """In-place rotation of points"""
 
-    R = StaticGeometry.angles2mat(roll, pitch, yaw)
+    R = Geometry.angles2mat(roll, pitch, yaw)
     for k, p in markers.items():
-        if isinstance(p, MarkerLocation):
+        if isinstance(p, VectorParameter):
             p.value = R @ p.value
         elif isinstance(p, np.ndarray):
             p[:] = R @ p
         else:
-            raise TypeError("Values in `points` have to be `Point` or"
-                            " `ndarray`.")
+            raise TypeError("Values in `points` have to be `VectorParameter` or"
+                            " `numpy.ndarray`.")
 
 
 def cube_points(w=1., d=2., h=4., optimize=False):
@@ -33,7 +34,7 @@ def cube_points(w=1., d=2., h=4., optimize=False):
 
     point_objs = []
     for point in points:
-        point_objs.append(MarkerLocation(point, optimize))
+        point_objs.append(VectorParameter(point, optimize))
 
     return point_objs
 
@@ -46,11 +47,11 @@ def triangle_column_points(rad=4., height=4., start_angle=0., num_angles=3,
 
     points = []
     for a in range(len(angles)):
-        p = MarkerLocation(
+        p = VectorParameter(
             [rad * np.cos(angles[a]), rad * np.sin(angles[a]), -height / 2],
             optimize)
         points.append(p)
-        p = MarkerLocation(
+        p = VectorParameter(
             [rad * np.cos(angles[a]), rad * np.sin(angles[a]), height / 2],
             optimize)
         points.append(p)

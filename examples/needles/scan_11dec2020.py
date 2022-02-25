@@ -115,7 +115,7 @@ def geoms_from_tiling_scan_reflex(tiling_dirs, angles):
     # describe a tilt of the rotation stage, which doesn't require yaw
     # (rotation about z-axis)
     motor_geom = reflex.centralize(motor_geom)
-    initial_geom = xray.StaticGeometry(
+    initial_geom = xray.Geometry(
         source=VectorParameter(motor_geom.tube_position),
         detector=VectorParameter(motor_geom.detector_position),
         roll=ScalarParameter(None),
@@ -139,7 +139,7 @@ def geoms_from_tiling_scan_reflex(tiling_dirs, angles):
         tmp_geom = reflex.centralize(tmp_geom)
 
         # start each tiling scan with a new initial geometry
-        initial_geom_copy = xray.StaticGeometry(
+        initial_geom_copy = xray.Geometry(
             source=initial_geom.own_parameters()['source'],
             detector=VectorParameter(tmp_geom.detector_position),
             roll=initial_geom.own_parameters()['roll'],
@@ -347,7 +347,7 @@ if __name__ == '__main__':
     #     optimizable=False,
     #     plot=False)
 
-    np.save('markers_11dec2020_calibrated_14jan2021.npy', markers)
+    # np.save('markers_11dec2020_calibrated_14jan2021.npy', markers)
 
     # full-angle reconstruction
     # NOTE: must allow int. division by calibration nrs to plot residuals!

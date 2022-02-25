@@ -6,14 +6,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pyqtgraph as pq
 import scipy.optimize
-from scipy import interpolate
 
 from cate import xray
 from cate.annotate import Annotator
 from cate.param import ScalarParameter, VectorParameter, params2ndarray
 from cate.xray import Detector, XrayOptimizationProblem, \
-    markers_from_leastsquares_intersection, plot_projected_markers, \
-    xray_multigeom_project
+    markers_from_leastsquares_intersection
 
 
 def needle_data_from_reflex(dir,
@@ -50,33 +48,6 @@ def needle_data_from_reflex(dir,
     return data
 
 
-def geoms_from_interpolation(tilted_geom,
-                             interpolation_geoms=None,
-                             interpolation_nrs=None,
-                             interpolation_calibration_nrs=None):
-    if interpolation_geoms is None or interpolation_nrs is None \
-        or interpolation_calibration_nrs is None:
-        raise ValueError
-
-    # reinterpolate angles (x=nrs, y=angles)
-    y = [g.transformation_yaw for g in interpolation_geoms]
-    y = np.squeeze(np.array(y))
-    f = interpolate.interp1d(interpolation_calibration_nrs, y,
-                             fill_value='extrapolate')
-    xnew = interpolation_nrs
-    ynew = f(xnew)
-    # plt.plot(interpolation_calibration_nrs, y, 'o', xnew, ynew, '-')
-    # plt.show()
-
-    geoms = []
-
-    for i, angle in enumerate(ynew):
-        rotated_geom = xray.transform(tilted_geom, yaw=angle)
-        geoms.append(rotated_geom)
-
-    return geoms
-
-
 def geoms_from_reflex(dir: str, angles, parametrization='default'):
     """Load CATE X-ray geometries from FleX-ray descriptions, using Reflex
 
@@ -90,9 +61,6 @@ def geoms_from_reflex(dir: str, angles, parametrization='default'):
     """
     import reflex
 
-    for a in angles:  # because I'm stupid enough to feed proj numbers in here
-        assert 0 <= a <= 2 * np.pi
-
     sett = reflex.Settings.from_path(dir)
     motor_geom = reflex.motor_geometry(sett, verbose=False)
 
@@ -102,7 +70,7 @@ def geoms_from_reflex(dir: str, angles, parametrization='default'):
         # describe a tilt of the rotation stage, which doesn't require yaw
         # (rotation about z-axis)
         motor_geom = reflex.centralize(motor_geom)
-        initial_geom = xray.StaticGeometry(
+        initial_geom = xray.Geometry(
             source=VectorParameter(motor_geom.tube_position),
             detector=VectorParameter(motor_geom.detector_position),
             roll=ScalarParameter(None),
@@ -118,7 +86,7 @@ def geoms_from_reflex(dir: str, angles, parametrization='default'):
         for i, angle in enumerate(angles):
             rotated_geom = xray.transform(
                 tilted_geom,
-                yaw=ScalarParameter(angle, optimize=True))
+                yaw=ScalarParameter(angle))
             geoms.append(rotated_geom)
 
     elif parametrization == 'default':
@@ -128,7 +96,7 @@ def geoms_from_reflex(dir: str, angles, parametrization='default'):
         geoms = []
         for nr, rg in reflex_geoms.to_dict().items():
             rg = reflex.centralize(rg)
-            geoms.append(xray.StaticGeometry(
+            geoms.append(xray.Geometry(
                 source=VectorParameter(rg.tube_position),
                 detector=VectorParameter(rg.detector_position),
                 roll=ScalarParameter(None),
@@ -138,43 +106,6 @@ def geoms_from_reflex(dir: str, angles, parametrization='default'):
         raise ValueError
 
     return geoms
-
-
-def geom2astravec(g: xray.StaticGeometry, detector):
-    """CATE X-ray geom -> ASTRA vector description
-
-    Note that the CATE description is dimensionless, so we use DET_PIXEL_WIDTH
-    and DET_PIXEL_HEIGHT inside the function to go back to real dimensions."""
-    c = lambda x: (x[1], x[0], - x[2])
-    d = lambda x: np.array(
-        (- x[1], - x[0], x[2])) * detector.pixel_width
-    e = lambda x: np.array(
-        (- x[1], - x[0], x[2])) * detector.pixel_height
-    return [*c(g.source),
-            *c(g.detector),
-            *d(xray.StaticGeometry.u(g.roll, g.pitch, g.yaw)),
-            *e(xray.StaticGeometry.v(g.roll, g.pitch, g.yaw))]
-
-
-def pixel2coord(pixel, det: Detector):
-    """
-    Annotated locations in the image frame do not directly correspond to good
-    (x, y) coordinates in the detector convention. In our convention the
-    detector midpoint is in (0, 0), the z-axis is pointing upwards and the
-    image is flipped.
-    """
-    pixel[0] = -pixel[0] + det.cols  # revert vertical axis (image convention)
-    pixel[1] = (pixel[1] - det.rows / 2) * det.pixel_width
-    pixel[0] = (pixel[0] - det.cols / 2) * det.pixel_height
-    pixel[1] = -pixel[1]  # observer frame is always flipped left-right
-
-    return pixel
-
-
-def pixels2coords(data, detector: Detector):
-    for proj in data:  # type: dict
-        for id, pixel in proj.items():
-            pixel[:] = pixel2coord(pixel, detector)
 
 
 def plot_astra_volume(vol_id, vol_geom, points: Any = False, from_side=False):
@@ -329,7 +260,8 @@ def astra_residual(projs_path, nrs, vol_id, vol_geom, angles=None, geoms=None):
     return rec.load_sinogram() - rec.sinogram(proj_id)
 
 
-def run_calibration(geoms, markers, data, plot_dets=False, verbose=True):
+def run_calibration(geoms, markers, data, method='trf',
+                    loss='huber', verbose=2, max_nfev=None):
     """In-place optimization of `geoms` and `points` using `data`
 
     :param geoms:
@@ -355,22 +287,24 @@ def run_calibration(geoms, markers, data, plot_dets=False, verbose=True):
         markers=markers,
         geoms=geoms,
         data=data,
+        use_multiprocessing=False
     )
 
     r = scipy.optimize.least_squares(
         fun=problem,
         x0=params2ndarray(problem.params()),
         bounds=problem.bounds(),
-        verbose=1,
-        method='trf',
+        verbose=verbose,
+        method=method,
         tr_solver='exact',
-        loss='huber',
-        jac='3-point'
+        loss=loss,
+        jac='3-point',
+        max_nfev=max_nfev
     )
     geoms_calibrated, markers_calibrated = problem.update(r.x)
 
     np.set_printoptions(precision=4, suppress=True)
-    if verbose:
+    if verbose >= 2:
         for i, (g1, g2) in enumerate(zip(geoms_initial, geoms_calibrated)):
             print(f"--- GEOM {i} ---")
             print(f"source   : {g1.source} : {g2.source}")
@@ -393,14 +327,9 @@ def run_calibration(geoms, markers, data, plot_dets=False, verbose=True):
         except:
             pass
 
-    if plot_dets:
-        data_predicted = xray_multigeom_project(geoms, markers)
-        for g, d1, d2 in zip(geoms, data, data_predicted):
-            plot_projected_markers(d1, d2, det=g.detector_props)
-        plt.show()
 
-
-def run_initial_marker_optimization(geoms, data, nr_iters: int = 20, plot=False):
+def run_initial_marker_optimization(geoms, data, nr_iters: int = 20,
+                                    plot=False, **kwargs):
     """Find points of the phantom that we have because of a high-resolution
     prescan.
     """
@@ -417,7 +346,12 @@ def run_initial_marker_optimization(geoms, data, nr_iters: int = 20, plot=False)
             plot=plot,
         )
         # Then find the optimal geoms given the `points` and `data`, in-place.
-        run_calibration(geoms, markers, data, verbose=False)
+        run_calibration(
+            geoms,
+            markers,
+            data,
+            **kwargs,
+        )
 
     # noinspection PyUnboundLocalVariable
     return markers

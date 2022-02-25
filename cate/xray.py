@@ -1,58 +1,15 @@
 from abc import ABC, abstractmethod
+from multiprocessing import Pool
 from typing import Any
 
 import numpy as np
 import transforms3d
 
-from cate.param import (Parameter, VectorParameter,
+from cate.param import (Parameter, ScalarParameter, VectorParameter,
                         params2ndarray, update_params)
 
 
-class MarkerLocation(VectorParameter):
-    pass
-
-
-class Detector:
-    """Taken from my `reflex` package, since I don't want a direct dependency
-    here."""
-
-    def __init__(self, rows, cols, pixel_width, pixel_height):
-        """
-        :param rows: Number of horizontal rows
-        :param cols: Number of vertical columns
-        :param pixel_size: Total pixel size
-        """
-        self._rows = rows
-        self._cols = cols
-        self._pixel_width = pixel_width
-        self._pixel_height = pixel_height
-
-    @property
-    def pixel_width(self):
-        return self._pixel_width
-
-    @property
-    def pixel_height(self):
-        return self._pixel_height
-
-    @property
-    def rows(self):
-        return self._rows
-
-    @property
-    def cols(self):
-        return self._cols
-
-    @property
-    def width(self):
-        return self.pixel_width * self.cols
-
-    @property
-    def height(self):
-        return self.pixel_height * self.rows
-
-
-class StaticGeometry:
+class Geometry:
     """Geometry description for a single angle without moving parts.
 
     I see two sensible ways to describe the detector vectors in a geometry.
@@ -218,27 +175,27 @@ class StaticGeometry:
     @staticmethod
     def u(r, p, y):
         """Horizontal u-vector in the detector frame."""
-        R = StaticGeometry.angles2mat(r, p, y)
+        R = Geometry.angles2mat(r, p, y)
         return R.T @ [0, 1, 0]
 
     @staticmethod
     def v(r, p, y):
         """Vertical v-vector in the detector frame."""
-        R = StaticGeometry.angles2mat(r, p, y)
+        R = Geometry.angles2mat(r, p, y)
         return R.T @ [0, 0, 1]
 
     @staticmethod
     def angles2mat(r, p, y) -> np.ndarray:
         return transforms3d.euler.euler2mat(
             r, p, y,
-            StaticGeometry.ANGLES_CONVENTION
+            Geometry.ANGLES_CONVENTION
         )
 
     @staticmethod
     def mat2angles(mat) -> tuple:
         return transforms3d.euler.mat2euler(
             mat,
-            StaticGeometry.ANGLES_CONVENTION
+            Geometry.ANGLES_CONVENTION
         )
 
     @classmethod
@@ -279,8 +236,8 @@ class StaticGeometry:
         return list(self.own_parameters().values())
 
 
-class BaseDecorator(StaticGeometry, ABC):
-    def __init__(self, decorated_geometry: StaticGeometry):
+class BaseDecorator(Geometry, ABC):
+    def __init__(self, decorated_geometry: Geometry):
         self._g = decorated_geometry
 
     @property
@@ -313,25 +270,24 @@ class BaseDecorator(StaticGeometry, ABC):
         # be to return self._g.parameters().
         raise NotImplementedError()
 
+    def asstatic(self):
+        return Geometry(
+            source=self.source,
+            detector=self.detector,
+            roll=self.roll,
+            pitch=self.pitch,
+            yaw=self.yaw)
+
 
 class transform(BaseDecorator):
     """Describes a coordinate transformation to a new orthogonal basis"""
 
     def __init__(self,
-                 geom: StaticGeometry,
+                 geom: Geometry,
                  roll: Any = 0.,
                  pitch: Any = 0.,
                  yaw: Any = 0.):
-        """Initialization
-
-        Fill in `None` for parameters that you don't want to use (they'll
-        default to 0.), and `0.` for parameters that need to be optimized.
-
-        :param axis:
-            An array with the *unit vector* that describes the tilt. Other
-            parametrizations (rpy) would be possible, but not implemented.
-        :param axis_bounds:
-        """
+        """Initialization"""
         super().__init__(decorated_geometry=geom)
 
         self.__roll = roll
@@ -360,7 +316,7 @@ class transform(BaseDecorator):
             return self.__yaw
 
     def __R(self):
-        return StaticGeometry.angles2mat(
+        return Geometry.angles2mat(
             self.transformation_roll,
             self.transformation_pitch,
             self.transformation_yaw,
@@ -377,10 +333,10 @@ class transform(BaseDecorator):
         the r', p' and y' can just be retrieved from those since
         S' = S R
         """
-        S = StaticGeometry.angles2mat(self._g.roll, self._g.pitch, self._g.yaw)
+        S = Geometry.angles2mat(self._g.roll, self._g.pitch, self._g.yaw)
         # TODO check if I need to get the RPY from S_prime or S_prime.T
         #    it must be the opposite operation of angles2mat?
-        return StaticGeometry.mat2angles(S @ self.__R())
+        return Geometry.mat2angles(S @ self.__R())
 
     @property
     def source(self):
@@ -424,7 +380,7 @@ class transform(BaseDecorator):
 
 class shift(BaseDecorator):
     def __init__(self,
-                 geom: StaticGeometry,
+                 geom: Geometry,
                  vector: Any = (0., 0., 0.)):
         super().__init__(decorated_geometry=geom)
 
@@ -461,8 +417,8 @@ class shift(BaseDecorator):
         return params
 
 
-def xray_project(geom: StaticGeometry, location: np.ndarray):
-    """X-ray projection
+def xray_project(geom: Geometry, location: np.ndarray) -> np.ndarray:
+    """X-ray projection of a marker `location` using a geometry `geom`.
 
     Not sure what consensus is, but I found the geometric method quite
     confusing so I was thinking this would be simple as well.
@@ -483,8 +439,7 @@ def xray_project(geom: StaticGeometry, location: np.ndarray):
     or, equivalently,
         t*(s-p) + y*u + z*v = s - d.
 
-    I wouldn't know how to differentiate to a solution a linear system of
-    equations, but here we are lucky. We already have an orthogonal basis,
+    We already have an orthogonal basis,
         (u, v, u cross v)
     and hence we know that if we rotate+shift to a basis so that the detector
     is the central point and u=(0,1,0) and v=(0,0,1) the system becomes:
@@ -495,10 +450,8 @@ def xray_project(geom: StaticGeometry, location: np.ndarray):
     Now having `t`, we substitute to get the other two equations:
         => y =  ...
         => z =  ...
-
-    I expect AD to have little trouble differentiating all this.
     """
-    R = StaticGeometry.angles2mat(geom.roll, geom.pitch, geom.yaw)
+    R = Geometry.angles2mat(geom.roll, geom.pitch, geom.yaw)
 
     # get `p-s`, `s-d`, `d` transformed
     p = np.dot(R, location - geom.detector)
@@ -514,16 +467,18 @@ def xray_project(geom: StaticGeometry, location: np.ndarray):
     return np.array((y, z))
 
 
-def xray_multigeom_project(geoms, markers: dict):
-    """Project all markers with all geometries
-    TODO: vectorize
+def xray_multigeom_project(geoms, markers: dict) -> list:
+    """Project all markers with all geometries.
+
+    Returns a list. Each list item contains a dictionary of projection values
+    belonging to a geometry from `geoms`.
     """
 
     data = []
     for g in geoms:
         projs = {}
         for id, marker in markers.items():
-            v = marker.value if isinstance(marker, MarkerLocation) else marker
+            v = marker.value if isinstance(marker, VectorParameter) else marker
             projs[id] = xray_project(g, v)
 
         data.append(projs)
@@ -531,20 +486,58 @@ def xray_multigeom_project(geoms, markers: dict):
     return data
 
 
+def xray_project_residuals(geom, proj, markers):
+    """Project markers only were there is data. Compute residuals."""
+
+    residuals = []
+    available_annotations = [(markers[id].value, p) for id, p in
+                             proj.items()]
+    for marker, projected in available_annotations:
+        residual = xray_project(geom, marker) - projected
+        residuals.append(residual)
+
+    return residuals
+
+
 class XrayOptimizationProblem:
-    def __init__(self, markers, geoms, data):
+    def __init__(self, markers, geoms, data,
+                 use_multiprocessing: bool = False,
+                 mode='jointly'):
+        """
+
+        :param markers:
+        :param geoms:
+        :param data:
+        :param use_multiprocessing:
+        :param mode: when mode is set to 'alternate', the markers are not
+        returned with params(), leading to a smaller optimization problem.
+        Instead the markers are computed using
+        `markers_from_leastsquares_intersection` in each iteration. This is
+        useful when there are many markers.
+        """
+        self._mode = mode
+        if mode not in ('jointly', 'alternate'):
+            raise ValueError(f'`mode` must be "jointly" or "alternate".')
+
+        if mode == 'alternate' and markers is not None:
+           raise ValueError('Set the `markers` argument to `None` when'
+                            '`mode` is "alternate"')
+
         self.markers = markers
         self.geoms = geoms
         self.data = np.array(data).flatten()
+
         # self.data = data
+        if use_multiprocessing:
+            self._pool = Pool()
 
     def params(self):
         """Consistent conversion of markers and geoms to list of parameters"""
 
         params = []
-        for id in sorted(self.markers.keys()):
-            params.append(self.markers[id])
-        # params = copy.copy(self.markers)
+        if self._mode == "jointly":
+            for id in sorted(self.markers.keys()):
+                params.append(self.markers[id])
 
         for g in self.geoms:
             for p in g.parameters():
@@ -575,16 +568,20 @@ class XrayOptimizationProblem:
         """Optimization call"""
         self.update(x)  # params restore values from `x`
 
-        # only project markers when there is annotated data for that marker
-        residuals = []
-        for geom, proj in zip(self.geoms, self.data):
-            available_annotations = [(self.markers[id].value, p) for id, p in
-                                     proj.items()]
-            for marker, projected in available_annotations:
-                residual = xray_project(geom, marker) - projected
-                residuals.append(residual)
+        if self._mode == "alternate":
+            self.markers = markers_from_leastsquares_intersection(
+                self.geoms, self.data)
 
-        return np.array(residuals).flatten()
+        if hasattr(self, '_pool'):
+            residuals = self._pool.starmap(
+                xray_project_residuals, zip(self.geoms, self.data,
+                                            [self.markers] * len(self.geoms)))
+        else:
+            residuals = []
+            for geom, proj in zip(self.geoms, self.data):
+                residuals.append(xray_project_residuals(geom, proj, self.markers))
+
+        return list(np.array(residuals).flatten())
 
 
 def markers_from_leastsquares_intersection(
@@ -639,9 +636,9 @@ def markers_from_leastsquares_intersection(
         ns = []
         ss = []
         ds = []
-        for g, p in projected_markers:  # type: (StaticGeometry, np.ndarray)
+        for g, p in projected_markers:  # type: (Geometry, np.ndarray)
             # the projection point in physical space
-            R_det = StaticGeometry.angles2mat(g.roll, g.pitch, g.yaw)
+            R_det = Geometry.angles2mat(g.roll, g.pitch, g.yaw)
             y = g.detector + R_det.T @ [0., p[0], p[1]]
             n = g.source - y  # normal vector
             n /= np.linalg.norm(n)
@@ -658,7 +655,7 @@ def markers_from_leastsquares_intersection(
                 ax.plot(k(0), k(1), k(2), 'gray')
 
         x = np.linalg.pinv(R) @ q
-        markers[id] = MarkerLocation(np.array(x), optimize=optimizable)
+        markers[id] = VectorParameter(np.array(x), optimize=optimizable)
 
         if plot:
             ns = np.array(ns).T
@@ -674,55 +671,3 @@ def markers_from_leastsquares_intersection(
         plt.show()
 
     return markers
-
-
-def plot_markers(markers):
-    import matplotlib.pyplot as plt
-    from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 unused import
-
-    fig = plt.figure()
-    ax = fig.add_subplot(111, projection='3d')
-    # plt.xlim(-10, 10)
-    # plt.ylim(-10, 10)
-    xs = [p[0] for p in markers]
-    ys = [p[1] for p in markers]
-    zs = [p[2] for p in markers]
-    ax.scatter(xs, ys, zs)
-    plt.show()
-
-
-def plot_projected_markers(*projected_markers, det=None, det_padding=1.2):
-    """
-
-    :param projected_markers:
-    :param det:
-        If not `None` must have properties `width` and `height`
-    :return:
-    """
-    import matplotlib.pyplot as plt
-    from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 unused import
-    from matplotlib.patches import Rectangle
-
-    plt.figure()
-    ax = plt.gca()
-    ax.set_aspect('equal', adjustable='box')
-
-    if det is not None:
-        plt.xlim(-det_padding * det.width, det_padding * det.width)
-        plt.ylim(-det_padding * det.height, det_padding * det.height)
-
-    for set_i, (set, m) in enumerate(zip(projected_markers, ['o', 'x', '*'])):
-        ys = [p[0] for k, p in set.items()]
-        zs = [p[1] for k, p in set.items()]
-        plt.scatter(ys, zs, marker=m)
-
-        for i, (k, p) in enumerate(set.items()):
-            ax.annotate(i, (ys[i] + set_i * 10, zs[i]))
-
-    if det is not None:
-        rect = Rectangle((-det.width, -det.height),
-                         2 * det.width, 2 * det.height,
-                         linewidth=1, edgecolor='r', facecolor='none')
-        ax.add_patch(rect)
-
-    plt.show()

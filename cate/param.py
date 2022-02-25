@@ -1,19 +1,21 @@
 import warnings
 from abc import ABC
+from typing import Any
 
 import numpy as np
 
 
 class Parameter(ABC):
-    """A delayable value with optimization information."""
+    """A (delayable) value with optimization information."""
 
     def __init__(self, value=None, optimize: bool = True, bounds=None):
         """
         :param value: Can also be `Callable` to delay computation.
-        :param optimize: Set to `False` to disable fitting procedure.
-        :param bounds: `None` or a `tuple` of ndarray.
+        :param optimize: Set to `False` to exclude from optimization.
+        :param bounds: `None` or a (min, max) `tuple` of `np.ndarray`.
         """
         self._value = value
+        self._value_original = value
         self.optimize = optimize
         self._bounds = bounds
 
@@ -46,8 +48,8 @@ class Parameter(ABC):
 
 
 class ScalarParameter(Parameter):
-    def __init__(self, value=None, optimize: bool = True, bounds=None):
-        super(ScalarParameter, self).__init__(value, optimize, bounds)
+    def __init__(self, value=None, **kwargs):
+        super(ScalarParameter, self).__init__(value, **kwargs)
 
     @property
     def value(self):
@@ -73,7 +75,7 @@ class VectorParameter(Parameter):
     locations, so I don't want to implicitly choose one.
     """
 
-    def __init__(self, value, optimize: bool = True, bounds=None):
+    def __init__(self, value, **kwargs):
         if issubclass(type(value), list):
             value = np.array(value, dtype=np.float)
 
@@ -83,16 +85,13 @@ class VectorParameter(Parameter):
         if not len(value) == 3:
             raise ValueError("`np.ndarray` must have length 3.")
 
-        super(VectorParameter, self).__init__(value, optimize, bounds)
+        super(VectorParameter, self).__init__(value, **kwargs)
 
 
 def params2ndarray(params, optimizable_only=True, key='value'):
-    """Packs a list of Packable into ndarray, and returns a list of types
-    to restore to.
+    """Packs a list of `Parameter` into `numpy.ndarray`, and returns a
+    list of types to restore to."""
 
-    :param params:
-    :return:
-    """
     # compute array length
     length = 0
     for p in params:
@@ -106,7 +105,8 @@ def params2ndarray(params, optimizable_only=True, key='value'):
 
         length += len(p)
 
-    assert length > 0
+    if length == 0:
+        return []
 
     out = np.empty(length)
     idx = 0
