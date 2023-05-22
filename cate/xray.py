@@ -475,7 +475,7 @@ def xray_multigeom_project(geoms, markers: dict) -> list:
     """
 
     data = []
-    for g in geoms:
+    for g in geoms.values():
         projs = {}
         for id, marker in markers.items():
             v = marker.value if isinstance(marker, VectorParameter) else marker
