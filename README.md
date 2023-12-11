@@ -1,4 +1,4 @@
-# CATE
+# CaTE
 CATE (CAlibration of Tomographic Equipment) is a small package for calibration of X-ray CT set-ups. It is essentially 
 a utility wrapping [_scipy.optimize.least_squares_](https://docs.scipy.org/doc/scipy/reference/generated/scipy.optimize.least_squares.html).
 It is written to find a geometry after scanning an object that features
