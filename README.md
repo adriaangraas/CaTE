@@ -1,5 +1,5 @@
 # CaTE
-CATE (CAlibration of Tomographic Equipment) is a small package for calibration of X-ray CT set-ups. It is essentially 
+CaTE (Calibration of Tomographic Equipment) is a small package for calibration of X-ray CT set-ups. It is essentially 
 a utility wrapping [_scipy.optimize.least_squares_](https://docs.scipy.org/doc/scipy/reference/generated/scipy.optimize.least_squares.html).
 It is written to find a geometry after scanning an object that features
 marker points, such as metal balls.
@@ -7,7 +7,7 @@ The user provides a parametrized geometry, as well as annotated data of
 the projected markers. SciPy's NLLS solver subsequently looks for geometry parameters that
 explain the markers.
 
-CATE is written with flexibility in mind. The parameters that may be optimized
+CaTE is written with flexibility in mind. The parameters that may be optimized
 are:
  - Geometries: tube locations, detector locations, as well
    as detector orientations (in roll-pitch-yaw format). Geometries can share
@@ -89,7 +89,7 @@ markers = {'marker_1': VectorParameter([0.0, 0.2, 0.0]),
 # observed projections of the markers at each geometry
 data = {...} 
 
-# `XrayOptimizationProblem` is CATE's helper for retrieving everything
+# `XrayOptimizationProblem` is CaTE's helper for retrieving everything
 # in a format that scipy likes.
 problem = XrayOptimizationProblem(markers,
                                   [geometry_1, geometry_2, geometry_3],
